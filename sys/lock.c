@@ -1,0 +1,273 @@
+#include <conf.h>
+#include <kernel.h>
+#include <proc.h>
+#include <q.h>
+#include <lock.h>
+#include <stdio.h>
+#include <custom.h>
+
+extern unsigned long ctr1000;
+extern int currpid;
+void rearrange_readyq(int priority)
+{
+      int node, prev, prio;
+      node = q[rdytail].qprev;
+      while (node != rdyhead)
+      {
+            prev = q[node].qprev;
+            node = getlast(q[node].qnext);
+
+            if (node == currpid)
+            {
+                  if (priority > proctab[node].pinh)
+                        proctab[node].pinh = priority;
+                  prio = (proctab[node].pinh == 0) ? proctab[node].pprio : proctab[node].pinh;
+                  kprintf("\n--------Current node : %d %d %d %d\n", node, priority, prio, proctab[node].pinh);
+            }
+
+            kprintf("\n--------Node being reaaranged  %d %d \n", node, prio);
+            insert(node, rdyhead, prio);
+            node = prev;
+      }
+}
+
+void set_lprio(int lck)
+{
+      struct lentry *lptr = &locks[lck];
+      kprintf("\n--------In set_lprio(): Prority Inversion Handling-------- \n");
+      int i, j, pinh;
+      int node = q[lptr->lrqtail].qprev;
+      lptr->lprio = 0;
+      while (node != lptr->lrqhead)
+      {
+            if (lptr->lprio < proctab[node].pprio)
+                  lptr->lprio = proctab[node].pprio;
+            node = q[node].qprev;
+      }
+
+     	//kprintf("\n Lprio is set to : %d\n", lptr->lprio);
+      node = q[lptr->lwqtail].qprev;
+      while (node != lptr->lwqhead)
+      {
+            if (lptr->lprio < proctab[node].pprio)
+                  lptr->lprio = proctab[node].pprio;
+            node = q[node].qprev;
+      }
+
+      for (i = NPROC - 1; i >= 0; i--)
+      {
+            if ((proctab[i].plocks[lck].status == L_CREATED) && (proctab[i].plocks[lck].waiting == FALSE))
+            {
+                  pinh = 0;
+                  for (j = NLOCK - 1; j >= 0; j--)
+                  {
+                        if ((proctab[i].plocks[j].status == L_CREATED) && (proctab[i].plocks[j].waiting == FALSE))
+                              if (locks[j].lprio > proctab[i].pprio)
+                              {
+                                    pinh = locks[j].lprio;
+                                    kprintf("\n-------- Prority Inversion Handling: Priority being changed-------- \n");
+                                    kprintf("\n -------- process id = %d, lock id = %d org_pinh =%d new_pinh = %d \n", i, j, proctab[i].pinh, pinh);
+                              }
+                  }
+                  proctab[i].pinh = pinh;
+            }
+      }
+}
+
+update_pcb(int ldes1, int type, int priority)
+{
+      kprintf("\n--------update_pcb()--------\n");
+      proctab[currpid].plocks[ldes1].type = type;
+      proctab[currpid].plocks[ldes1].priority = priority;
+      proctab[currpid].plocks[ldes1].status = L_CREATED;
+      proctab[currpid].plocks[ldes1].waiting = FALSE;
+}
+
+update_pcbOnBlocking(int ldes1, int type, int priority)
+{
+      proctab[currpid].plocks[ldes1].type = type;
+      proctab[currpid].plocks[ldes1].priority = priority;
+      proctab[currpid].plocks[ldes1].status = L_CREATED;
+      proctab[currpid].plocks[ldes1].waiting = TRUE;
+      proctab[currpid].plocks[ldes1].blocking_time = ctr1000;
+      proctab[currpid].pstate = PRSUSP;
+}
+
+struct lentry* getLock_ptr(int ldes1)
+{
+
+      struct lentry *lockptr = &locks[ldes1];
+      return (lockptr);
+
+}
+
+int islockOK(struct lentry *lockptr, int lock)
+{
+      if ((lockptr->lstate) == LFREE || (proctab[currpid].plocks[lock].status != L_CREATED))
+      {
+            return (SYSERR);
+      }
+      else
+            return OK;
+}
+
+printlwqueue(struct lentry *lptr)
+{
+      int node, tmp;
+      kprintf("\n--------printlwqueue()--------\n");
+      node = q[lptr->lwqtail].qprev;
+      while (node != lptr->lwqhead)
+      {
+            tmp = q[node].qprev;
+            kprintf("--------Lock Writer Queue ###: %d--------\n", node);
+            node = tmp;
+      }
+}
+
+printlrqueue(struct lentry *lptr)
+{
+      int node, tmp;
+      kprintf("\n--------printlrqueue()--------\n");
+      node = q[lptr->lrqtail].qprev;
+      while (node != lptr->lrqhead)
+      {
+            tmp = q[node].qprev;
+            kprintf("--------Lock Readers Queue ###: %d--------\n", node);
+            node = tmp;
+      }
+}
+
+SYSCALL lock(int ldes1, int type, int priority)
+{
+      STATWORD ps;
+      struct lentry * lptr;
+      int writer_node, reader_node;
+
+      kprintf("\n--------In lock()--------\n");
+      kprintf("\n--------Lock Info - id = %d, type = %d, priority = %d-------- \n", ldes1, type, priority);
+      disable(ps);
+
+     	// get lock pointer
+
+     	//lptr = getLock_ptr(ldes1);
+
+     	// To be deleted
+      lptr = &locks[ldes1];
+
+      printlwqueue(lptr);
+      printlrqueue(lptr);
+
+     	// validate the lock
+
+      kprintf("\n--------checking for badlock--------\n");
+
+      if (!islockOK(lptr, ldes1))
+      {
+            restore(ps);
+            return (SYSERR);
+      }
+
+     	// COre Logic
+      switch (lptr->lacq)
+      {
+
+            case NOT_ACQUIRED:
+
+                  kprintf("\n--------Lock is unacquired--------\n");
+                  if (type == READ)
+                  {
+                        lptr->lcnt = 1;
+                        lptr->lacq = ACQUIRED_BY_READER;
+                        kprintf("\n--------Lock acquired by Reader--------\n");
+                  }
+
+                  if (type == WRITE)
+                  {
+                        lptr->lacq = ACQUIRED_BY_WRITER;
+                        kprintf("\n--------Lock acquired by Writer--------\n");
+                  }
+
+                  update_pcb(ldes1, type, priority);
+                  break;
+
+            case ACQUIRED_BY_READER:
+
+                  kprintf("\n--------Lock already held by Reader \n");
+                  if (type == READ)
+                  {
+
+                        kprintf("\n--------Reader is trying to acquire a lock--------\n");
+                        writer_node = q[lptr->lwqtail].qprev;
+                       	//kprintf("\n--Writer's node id = %d priority = %d \n ----------", writer_node,q[writer_node].qkey);
+                        reader_node = q[lptr->lrqtail].qprev;
+                       	// if the q is not empty and the last node (writer) in the q has highest priority
+                        if ((q[writer_node].qkey > priority))
+                        {
+                              kprintf("\n--------Already high priority writer waiting priority : %d\n--------", q[writer_node].qkey);
+                             	//revamp(proctab[currpid].pprio, ldes1);
+                             	//insert_2_lockq_and_resched(ldes1, lptr, priority, ps);
+                              update_pcbOnBlocking(ldes1, type, priority);
+
+                             	//kprintf("\n-----Before priority Inversion------");
+                             	//Insert to Lock queue and reschedule		
+                              insert(currpid, lptr->lrqhead, priority);
+                              kprintf("\n--------Prema--------\n");
+                              set_lprio(ldes1);
+                             	//insert(currpid,rdyhead,priority);
+                             	//rearrange_readyq(priority);
+                              resched();
+                        }
+                        else
+                        {
+                             	//Let the new reader acquire this lock
+                              lptr->lcnt++;
+                              update_pcb(ldes1, type, priority);
+                        }
+                  }
+                  else
+                  {
+                        kprintf("\n--------Writer is trying to acquire a lock.But will be pushed in lock's writer queue--------\n");
+                       	//revamp(proctab[currpid].pprio, ldes1);
+                       	//insert_2_lockq_and_resched(ldes1, lptr, priority, ps);
+                        update_pcbOnBlocking(ldes1, type, priority);
+                       	//Insert to Lock queue and reschedule
+                        kprintf("\n--------currpid being pushed in lockqueue:%d --------\n", currpid);
+                        insert(currpid, lptr->lwqhead, priority);
+                        kprintf("\n--------Dushyant--------\n");
+                        set_lprio(ldes1);
+                       	//proctab[currpid].pprio = priority;
+                       	//proctab[currpid].pinh = priority;
+                       	//insert(currpid,rdyhead,priority);
+                       	//rearrange_readyq(priority);
+                        resched();
+                  }
+                  break;
+
+            case ACQUIRED_BY_WRITER:
+
+                  kprintf("\n--------Lock already held by writer--------\n");
+                  update_pcbOnBlocking(ldes1, type, priority);
+                 	//Insert to Lock queue and reschedule
+                  if (type == READ)
+                  {
+                        kprintf("\n--------Reader is trying to acquire a lock.But will pushed in Lock's reader queue--------\n");
+                        insert(currpid, lptr->lrqhead, priority);
+                        kprintf("\n--------Kamlesh--------\n");
+                        set_lprio(ldes1);
+                        resched();
+                  }
+                  else
+                  {
+                        kprintf("\n--------Writer is trying to acquire a lock.But will pushed in Lock's writer queue--------\n");
+                        insert(currpid, lptr->lwqhead, priority);
+                        kprintf("\n--------Shahsi--------\n");
+                        set_lprio(ldes1);
+                       	//rearrange_readyq(priority);
+                       	//insert(currpid,rdyhead,priority);
+                        resched();
+                  }
+      }
+
+      restore(ps);
+      return (OK);
+}

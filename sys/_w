@@ -1,0 +1,176 @@
+#include <conf.h>
+#include <kernel.h>
+#include <proc.h>
+#include <q.h>
+#include <lock.h>
+#include <stdio.h>
+#include <custom.h>
+
+extern unsigned long ctr1000;
+extern int currpid;
+
+
+update_pcb(int ldes1,int type, int priority)
+{
+     proctab[currpid].plocks[ldes1].type = type;
+     proctab[currpid].plocks[ldes1].priority = priority;
+     proctab[currpid].plocks[ldes1].status = L_CREATED;
+
+     proctab[currpid].plocks[ldes1].waiting = FALSE;
+}
+
+
+update_pcbOnBlocking(int ldes1,int type, int priority)
+{
+     proctab[currpid].plocks[ldes1].type = type;
+     proctab[currpid].plocks[ldes1].priority = priority;
+     proctab[currpid].plocks[ldes1].status = L_CREATED;
+     
+     proctab[currpid].plocks[ldes1].waiting = TRUE;
+     proctab[currpid].plocks[ldes1].blocking_time = ctr1000;
+     proctab[currpid].pstate = PRSUSP;
+}
+
+
+
+struct  lentry*  getLock_ptr(int ldes1)
+ {
+
+        struct  lentry  *lockptr =  &locks[ldes1];
+	return (lockptr);
+
+ }
+
+int  islockOK (struct lentry* lockptr,int lock )
+ {
+	if ((lockptr->lstate)==LFREE || (proctab[currpid].plocks[lock].status != L_CREATED))
+	 {
+            return(SYSERR);
+         }
+	else
+	    return OK;
+ }
+
+
+
+SYSCALL lock(int ldes1, int type, int priority)
+{
+        STATWORD ps;
+        struct  lentry  *lptr;
+	int writer_node,reader_node;
+
+	 kprintf("\n--------------------In lock()----------------------\n");
+	 kprintf("Lock Info %d, %d, %d, %d\n", ldes1, type, priority, lptr->lacq);
+        disable(ps);
+	
+
+	// get lock pointer
+	
+	//lptr = getLock_ptr(ldes1);
+
+	// To be deleted
+	lptr= &locks[ldes1];
+
+
+        // validate the lock
+        
+        kprintf("\n-------------------before badlock----------------------\n");
+	
+	if(!islockOK(lptr,ldes1))
+         {
+ 	   restore(ps);
+           return(SYSERR);
+         }
+
+         kprintf("\n-------------------before switch----------------------\n");
+
+	// COre Logic
+	switch (lptr->lacq)
+         {
+      	   
+	    case NOT_ACQUIRED :
+
+			if (type == READ)
+   			  {
+			     lptr->lcnt = 1;
+			     lptr->lacq = ACQUIRED_BY_READER;
+			     kprintf("\n--------------------Acquired by reader----------------------\n");
+			  }
+
+
+			if (type == WRITE)
+			  {
+			    lptr->lacq = ACQUIRED_BY_WRITER;
+			     kprintf("\n--------------------Acquired by writer----------------------\n");
+			  }
+		
+			update_pcb(ldes1, type, priority);
+			break;
+
+
+	   case ACQUIRED_BY_READER: 
+
+				 if (type == READ)
+				    {
+
+        				 kprintf("\n-------------------reader 2 ----------------------\n");
+                                	 writer_node = q[lptr->lwqtail].qprev;
+                                	 reader_node = q[lptr->lrqtail].qprev;
+                                	// if the q is not empty and the last node (writer) in the q has highest priority
+                                	if ((q[writer_node].qkey > priority))
+					   {
+                                             revamp(proctab[currpid].pprio, ldes1);
+                                             //insert_2_lockq_and_resched(ldes1, lptr, priority, ps);
+                                             update_pcbOnBlocking(ldes1,type,priority);
+                                	   }
+                                	else
+					  {
+                                        //Let the new reader acquire this lock
+                                            lptr->lcnt++;
+                        		    update_pcb(ldes1, type, priority);
+                                	  }
+                        	   }
+
+				else
+				  {
+                                	kprintf("\n-------------------writer 2 ----------------------\n");
+					revamp(proctab[currpid].pprio, ldes1);
+                                	//insert_2_lockq_and_resched(ldes1, lptr, priority, ps);
+                          	        update_pcb(ldes1, type, priority);
+
+				  }
+				break;
+
+
+	   case ACQUIRED_BY_WRITER:
+				
+			     		 kprintf("\n--------------------Acquired by writer----------------------\n");
+                                         update_pcb(ldes1, type, priority);
+					 insert(currpid, lptr->lqhead, priority);
+        				 set_lprio(ldes1);
+        			         restore(ps);
+        				 resched();
+
+
+
+         }
+	
+	restore(ps);
+	return(OK);
+}
+
+
+
+// Steps for priority inversion
+
+
+
+//
+
+
+
+
+
+
+
+
